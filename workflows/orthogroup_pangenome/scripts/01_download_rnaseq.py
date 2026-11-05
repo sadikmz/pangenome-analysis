@@ -3,7 +3,7 @@
 
 Based on the standalone CLI conventions of 01_download_asmProt.py.
 Requires Python >=3.9; downloads additionally require SRA Toolkit >=3.4.0.
-See RNAseq_DOWNLOAD.md for eligibility, storage requirements, and limitations.
+See workflows/orthogroup_pangenome/README.md for usage and limitations.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import gzip
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -32,6 +33,15 @@ import xml.etree.ElementTree as ET
 
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 RUN_RE = re.compile(r"[SED]RR[0-9]+\Z")
+READ_TYPES = frozenset(("paired_short", "pacbio", "nanopore"))
+SRA_TABLE_FIELDS = (
+    "Run", "Experiment", "SRAStudy", "BioProject", "Sample", "BioSample",
+    "SampleName", "ScientificName", "TaxID", "read_type", "LibraryName",
+    "LibraryStrategy", "LibrarySource", "LibrarySelection", "LibraryLayout",
+    "Platform", "Model", "spots", "bases", "spots_with_mates", "avgLength",
+    "size_MB", "ReleaseDate", "LoadDate", "CenterName", "Submission", "Consent",
+    "selected", "selection_reason", "metadata_warning",
+)
 
 
 def utc_now() -> str:
@@ -79,7 +89,7 @@ class NcbiClient:
             except urllib.error.HTTPError as exc:
                 retry = exc.code == 429 or 500 <= exc.code < 600
                 message = f"NCBI {endpoint}: HTTP {exc.code}"
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
                 retry = True
                 message = f"NCBI {endpoint}: {type(exc).__name__}"
             if not retry or attempt + 1 == self.retries:
@@ -139,7 +149,7 @@ def build_query(taxid: str, exact_taxon=False) -> str:
     # Broader than eligibility: missing RNA source must not hide labelled RNA-Seq.
     # The RNA property also captures long reads classified outside RNA-Seq.
     return (
-        f'{organism} AND ("rna seq"[Strategy] OR '
+        f'{organism} AND public[Access] AND ("rna seq"[Strategy] OR '
         '((pacbio_smrt[Platform] OR oxford_nanopore[Platform]) AND '
         '(TRANSCRIPTOMIC[Source] OR biomol_rna[Properties])))'
     )
@@ -150,6 +160,9 @@ def normalized(value: str) -> str:
 
 
 def classify_run(row: dict) -> tuple[str, str]:
+    consent = normalized(row.get("Consent", ""))
+    if consent and consent != "public":
+        return "", "excluded: non-public/controlled-access consent"
     platform = normalized(row.get("Platform", ""))
     strategy = normalized(row.get("LibraryStrategy", ""))
     source = normalized(row.get("LibrarySource", ""))
@@ -177,15 +190,68 @@ def write_manifest(root: Path, rows: list[dict]) -> None:
         "".join(row["Run"] + "\n" for row in rows if row["selected"] == "yes"), encoding="utf-8")
 
 
-def discover_runs(client, taxon: dict, root: Path, exact_taxon=False, page_size=500) -> tuple[list[dict], dict]:
+def write_sra_run_table(root: Path, rows: list[dict]) -> Path:
+    """Export selected RunInfo records, keeping every supplied metadata field.
+
+    This is a RunInfo-derived table, not NCBI's browser SraRunTable.txt export;
+    custom sample attributes absent from RunInfo cannot be reconstructed here.
+    """
+    selected = [row for row in rows if row.get("selected") == "yes"]
+    fields = list(SRA_TABLE_FIELDS) + sorted({key for row in selected for key in row} - set(SRA_TABLE_FIELDS))
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "sra_run_table.tsv"
+    temporary = path.with_suffix(".tsv.tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(selected)
+    temporary.replace(path)
+    return path
+
+
+def print_sra_run_table(rows: list[dict], path: Path, limit=20) -> None:
+    """Print a bounded preview; the TSV always contains every selected row."""
+    if limit < 0:
+        raise ValueError("List limit must be zero or positive")
+    selected = [row for row in rows if row.get("selected") == "yes"]
+    preview = selected if limit == 0 else selected[:limit]
+    print(f"\nSRA selector-style table (RunInfo; showing {len(preview)} of {len(selected)} selected runs)")
+    columns = ("Run", "BioProject", "BioSample", "SampleName", "ScientificName", "read_type",
+               "LibraryStrategy", "LibraryLayout", "Platform", "Model", "spots", "bases", "size_MB")
+    if preview:
+        writer = csv.writer(sys.stdout, delimiter="\t", lineterminator="\n")
+        writer.writerow(columns)
+        for row in preview:
+            # Keep raw TSV metadata untouched, but don't let embedded tabs or
+            # newlines in sample descriptions split the terminal preview rows.
+            values = []
+            for field in columns:
+                value = row.get(field)
+                value = "" if value is None else str(value)
+                values.append(re.sub(r"[\x00-\x1f\x7f]+", " ", value).strip() or "-")
+            writer.writerow(values)
+    else:
+        print("No selected runs.")
+    print("RunInfo-derived; not an exact copy of NCBI's browser SraRunTable.txt. Only attributes in RunInfo are shown.")
+    print("spots are sequencing spots, not individual reads; size_MB is reported archive size, not FASTQ size.")
+    print(f"Full selected-run metadata ({len(selected)} rows, all available columns): {path}")
+    if len(preview) < len(selected):
+        print("Use --list-limit 0 to print every selected run; the TSV is never preview-limited.")
+
+
+def discover_runs(client, taxon: dict, root: Path, exact_taxon=False, page_size=500, read_types=None) -> tuple[list[dict], dict]:
     if not 1 <= page_size <= 10000:
         raise ValueError("Page size must be 1..10000")
+    enabled = READ_TYPES if read_types is None else frozenset(read_types)
+    if not enabled or not enabled.issubset(READ_TYPES):
+        raise ValueError("Select at least one valid read type: paired_short, pacbio, nanopore")
     root.mkdir(parents=True, exist_ok=True)
     raw_dir = root / "metadata" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     raw_dir.mkdir(parents=True)
     query = build_query(taxon["taxid"], exact_taxon)
     info = {"taxon": taxon, "query": query, "retrieved_utc": utc_now(), "complete": False,
-            "raw_metadata_dir": str(raw_dir), "experiment_count": 0, "run_count": 0}
+            "raw_metadata_dir": str(raw_dir), "experiment_count": 0, "run_count": 0,
+            "read_types": sorted(enabled)}
     write_json(root / "discovery.json", info)
     try:
         raw_search = client.get("esearch.fcgi", db="sra", term=query, retmax=0,
@@ -201,7 +267,7 @@ def discover_runs(client, taxon: dict, root: Path, exact_taxon=False, page_size=
         for start in range(0, count, page_size):
             print(f"Metadata: experiments {start + 1}–{min(start + page_size, count)} / {count}", flush=True)
             raw_page = client.get("esearch.fcgi", db="sra", term=f'#{search["querykey"]}',
-                                  WebEnv=search["webenv"], retstart=start, retmax=page_size, retmode="json")
+                                  WebEnv=search["webenv"], usehistory="y", retstart=start, retmax=page_size, retmode="json")
             (raw_dir / f"ids_{start:09d}.json").write_text(raw_page, encoding="utf-8")
             page = search_result(raw_page)
             ids = page.get("idlist", [])
@@ -233,12 +299,14 @@ def discover_runs(client, taxon: dict, root: Path, exact_taxon=False, page_size=
         for run in sorted(runs):
             item = runs[run]
             bucket, reason = classify_run(item)
+            if bucket and bucket not in enabled:
+                reason = f"excluded by requested read-type filter: {reason}"
             warnings = []
             if normalized(item.get("LibraryStrategy", "")) == "rnaseq" and normalized(item.get("LibrarySource", "")) != "transcriptomic":
                 warnings.append("RNA-Seq label with missing/non-TRANSCRIPTOMIC source")
             if any(not item.get(k) for k in ("Platform", "LibraryLayout", "LibraryStrategy", "LibrarySource")):
                 warnings.append("missing classification metadata")
-            rows.append({**item, "read_type": bucket, "selected": "yes" if bucket else "no",
+            rows.append({**item, "read_type": bucket, "selected": "yes" if bucket in enabled else "no",
                          "selection_reason": reason, "metadata_warning": "; ".join(warnings)})
         info.update(complete=True, run_count=len(rows), selected_run_count=sum(row["selected"] == "yes" for row in rows),
                     retrieved_experiment_count=len(seen_experiments))
@@ -263,13 +331,18 @@ def verify_completion(run_dir: Path, settings: dict) -> bool:
     """A completion marker is trusted only with identical settings and bytes."""
     try:
         record = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
-        if (record.get("status") != "complete" or record.get("settings") != settings
-                or record.get("archive_format") != "SRA Normalized" or not record.get("files")):
+        if (not isinstance(record, dict) or record.get("Run") != run_dir.name
+                or record.get("status") != "complete" or record.get("settings") != settings
+                or record.get("archive_format") != "SRA Normalized"
+                or not isinstance(record.get("files"), list) or not record["files"]):
             return False
         names = set()
         for item in record["files"]:
+            if not isinstance(item, dict):
+                return False
             name = item["name"]
-            if Path(name).name != name or not name.endswith(".fastq.gz") or name in names:
+            if (not isinstance(name, str) or Path(name).name != name or name in names
+                    or not re.fullmatch(re.escape(run_dir.name) + r"(?:_[0-9]+)?\.fastq\.gz", name)):
                 return False
             names.add(name)
             path = run_dir / name
@@ -304,7 +377,7 @@ def run_command(command: list[str], log_path: Path, env: dict, retries=1) -> str
 
 
 def download_run(row: dict, root: Path, cache_dir: Path, tmp_dir: Path,
-                 threads=4, retries=3, pacbio_table="auto", include_technical=False) -> dict:
+                 threads=4, retries=3, pacbio_table="auto", include_technical=False, tool_versions=None) -> dict:
     """Resume an archive, validate it, then publish one checksummed FASTQ set."""
     run = row["Run"]
     if not RUN_RE.fullmatch(run):
@@ -335,7 +408,7 @@ def download_run(row: dict, root: Path, cache_dir: Path, tmp_dir: Path,
     with tempfile.TemporaryDirectory(prefix=f".{run}-", dir=fastq_root) as stage_name, \
             tempfile.TemporaryDirectory(prefix=f"{run}-", dir=tmp_dir) as scratch_name:
         stage = Path(stage_name)
-        command = ["fasterq-dump", str(archive), "--outdir", str(stage), "--temp", scratch_name,
+        command = ["fasterq-dump", str(cache), "--outdir", str(stage), "--temp", scratch_name,
                    "--threads", str(threads), "--details"]
         command += ["--split-files", "--include-technical"] if include_technical else ["--split-3"]
         is_pacbio = normalized(row.get("Platform", "")) in ("pacbio", "pacbiosmrt")
@@ -361,9 +434,11 @@ def download_run(row: dict, root: Path, cache_dir: Path, tmp_dir: Path,
                   "settings": settings, "archive_format": "SRA Normalized",
                   "archive_path": str(archive), "archive_size": archive.stat().st_size,
                   "quality_preference": "R", "source_metadata": row, "files": files,
+                  "tool_versions": tool_versions or {},
                   "conversion_details": details,
                   "table_policy": "PacBio SEQUENCE override" if is_pacbio and pacbio_table == "SEQUENCE"
-                  else "Toolkit default: consensus when available, otherwise sequence"}
+                  else ("PacBio default: consensus when available, otherwise sequence" if is_pacbio
+                        else "Toolkit default (see conversion details)")}
         write_json(stage / "complete.json", record)
         # Retain old output on a changed/corrupt rerun. Do not mingle stale files
         # with a new output set, or delete files supplied by the user.
@@ -384,7 +459,7 @@ def check_toolkit() -> dict:
     versions = {}
     for tool in ("prefetch", "vdb-validate", "fasterq-dump"):
         if not shutil.which(tool):
-            raise RuntimeError(f"SRA Toolkit executable {tool!r} not found. Install sra-tools >=3.4.0; see RNAseq_DOWNLOAD.md")
+            raise RuntimeError(f"SRA Toolkit executable {tool!r} not found. Install sra-tools >=3.4.0: https://github.com/ncbi/sra-tools")
         result = subprocess.run([tool, "--version"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, check=False)
         match = re.search(r"\b([0-9]+)\.([0-9]+)\.([0-9]+)\b", result.stdout)
@@ -420,7 +495,7 @@ def positive_int(value: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Download all discoverable paired-end RNA-Seq and PacBio/ONT RNA runs for a species from NCBI.",
-        epilog="Includes strains/subspecies by default. --list-only transfers metadata only. See RNAseq_DOWNLOAD.md.",
+        epilog="Includes strains/subspecies by default. --list-only transfers metadata only. See workflows/orthogroup_pangenome/README.md.",
     )
     parser.add_argument("species", nargs="?", help="Scientific species name, quoted if it contains spaces")
     parser.add_argument("--taxid", type=positive_int, help="NCBI TaxID instead of a species name")
@@ -430,7 +505,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threads", type=positive_int, default=4, help="Threads per conversion; runs processed sequentially (default: 4)")
     parser.add_argument("--retries", type=positive_int, default=3, help="Maximum HTTP/prefetch attempts (default: 3)")
     parser.add_argument("--timeout", type=positive_int, default=120, help="HTTP timeout seconds (default: 120)")
-    parser.add_argument("--list-only", action="store_true", help="Save run metadata and selected accessions without downloading reads")
+    parser.add_argument("--list-only", action="store_true", help="Preview RunInfo metadata and export sra_run_table.tsv without downloading reads or needing SRA Toolkit. RunInfo-derived; not an exact copy of NCBI's browser SraRunTable.txt")
+    parser.add_argument("--list-limit", type=int, default=20, metavar="N", help="Maximum selected rows printed by --list-only (default: 20; 0 prints all); TSV always includes all selected runs")
+    parser.add_argument("--paired-end", action="store_true", help="Select paired-end short RNA-Seq; combine with --long-reads for both (default: both when neither flag is given)")
+    parser.add_argument("--long-reads", action="store_true", help="Select PacBio/ONT RNA reads regardless of layout; combine with --paired-end for both")
     parser.add_argument("--exact-taxon", action="store_true", help="Only the exact TaxID, excluding descendant strain/subspecies nodes")
     parser.add_argument("--pacbio-table", choices=("auto", "SEQUENCE"), default="auto", help="PacBio table: consensus when available (auto), or SEQUENCE; does not override ONT")
     parser.add_argument("--include-technical", action="store_true", help="Include barcode/technical reads using split-files; disables split-3 orphan separation")
@@ -443,6 +521,15 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if bool(args.species) == bool(args.taxid):
         parser.error("Supply a species name or --taxid, exclusively")
+    if args.list_limit < 0:
+        parser.error("--list-limit must be zero or positive")
+    read_types = set()
+    if args.paired_end:
+        read_types.add("paired_short")
+    if args.long_reads:
+        read_types.update(("pacbio", "nanopore"))
+    if not read_types:
+        read_types.update(READ_TYPES)
     client = NcbiClient(email=args.email, api_key=os.environ.get("NCBI_API_KEY"),
                         retries=args.retries, timeout=args.timeout)
     try:
@@ -452,7 +539,7 @@ def main(argv=None) -> int:
         root.mkdir(parents=True, exist_ok=True)
         with project_lock(root):
             print(f'Taxon: {taxon["name"]} (TaxID {taxon["taxid"]}, rank {taxon["rank"]})\nOutput: {root}', flush=True)
-            rows, info = discover_runs(client, taxon, root, exact_taxon=args.exact_taxon)
+            rows, info = discover_runs(client, taxon, root, exact_taxon=args.exact_taxon, read_types=read_types)
             if not info.get("complete"):
                 raise RuntimeError("Discovery did not complete; downloads will not start")
             selected = [row for row in rows if row["selected"] == "yes"]
@@ -466,7 +553,10 @@ def main(argv=None) -> int:
                 except (ValueError, KeyError):
                     pass
             if known_sizes:
-                print(f"Known archive size: {sum(known_sizes):,.1f} MB for {len(known_sizes)}/{len(selected)} runs; FASTQ and scratch need additional space.")
+                print(f"RunInfo archive-size estimate: {sum(known_sizes):,.1f} MB for {len(known_sizes)}/{len(selected)} runs; normalized SRA may differ, and FASTQ/scratch need additional space.")
+            if args.list_only:
+                table_path = write_sra_run_table(root, rows)
+                print_sra_run_table(rows, table_path, limit=args.list_limit)
             if args.list_only or not selected:
                 print("Metadata saved; no sequencing reads downloaded.")
                 return 0
@@ -474,6 +564,7 @@ def main(argv=None) -> int:
             cache = args.dl_dir.expanduser().resolve() if args.dl_dir else root / "_sra"
             scratch = args.tmp_dir.expanduser().resolve() if args.tmp_dir else root / "_tmp"
             execution = {"started_utc": utc_now(), "taxon": taxon, "tool_versions": versions,
+                         "read_types": sorted(read_types),
                          "python": sys.version.split()[0], "cache_dir": str(cache), "tmp_dir": str(scratch),
                          "settings": {"pacbio_table": args.pacbio_table, "include_technical": args.include_technical},
                          "threads": args.threads, "quality_preference": "R", "prefetch_max_size": "u",
@@ -485,9 +576,10 @@ def main(argv=None) -> int:
                 print(f"[{index}/{len(selected)}] {run} ({row['read_type']})", flush=True)
                 try:
                     result = download_run(row, root, cache, scratch, threads=args.threads, retries=args.retries,
-                                          pacbio_table=args.pacbio_table, include_technical=args.include_technical)
+                                          pacbio_table=args.pacbio_table, include_technical=args.include_technical,
+                                          tool_versions=versions)
                     execution["runs"][run] = {"status": result["status"], "resumed": result.get("resumed", False),
-                                               "files": result["files"]}
+                                               "files": result["files"], "tool_versions": result.get("tool_versions", {})}
                 except (RuntimeError, OSError) as exc:
                     execution["runs"][run] = {"status": "failed", "error": str(exc)}
                     print(f"[{run}] FAILED: {exc}", file=sys.stderr, flush=True)

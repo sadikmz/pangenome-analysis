@@ -57,6 +57,45 @@ cp $DATA/proteomes/OrthoFinder/Results_*/Species_Tree/SpeciesTree_rooted.txt $DA
 python $W/scripts/04_phylogenomics.py --data-dir $DATA --run-dir $RUN
 ```
 
+## RNA-seq metadata and reads
+
+`01_download_rnaseq.py` finds a species' public RNA-seq runs in NCBI SRA. With `--list-only` it fetches
+metadata only: it downloads no reads and doesn't need SRA Toolkit. Run these from the repository root.
+
+```bash
+W=workflows/orthogroup_pangenome
+OUT=$W/data/rnaseq
+
+# Both read categories; prints the first 20 selected runs
+python3 $W/scripts/01_download_rnaseq.py "Fusarium graminearum" --list-only --out-dir $OUT
+
+# Paired-end short RNA-Seq only; prints every selected run
+python3 $W/scripts/01_download_rnaseq.py "Fusarium graminearum" --paired-end --list-only --list-limit 0 --out-dir $OUT
+
+# PacBio/ONT transcriptomic reads only
+python3 $W/scripts/01_download_rnaseq.py "Fusarium graminearum" --long-reads --list-only --out-dir $OUT
+```
+
+| Flags | Runs selected |
+|---|---|
+| `--paired-end` | Paired-end short RNA-Seq |
+| `--long-reads` | PacBio/ONT transcriptomic reads |
+| Both, or neither | Both categories |
+
+The screen shows a Run Selector-style preview: `--list-limit N` sets its length (default 20; 0 prints every
+selected run). Each run also writes `$OUT/<species>_taxid<TaxID>/sra_run_table.tsv`, with every selected run and
+all available metadata columns whatever the preview limit. It replaces the previous table for that species.
+
+- The table is RunInfo-derived, not an exact copy of NCBI's browser `SraRunTable.txt`. Attributes such as tissue
+  or treatment appear only if RunInfo supplies them.
+- Missing values are blank in the table and shown as `-` on screen.
+- `spots` are not individual reads, and `size_MB` is the reported archive size, not FASTQ size.
+- Use `--list-limit` to shorten the preview, not `| head`: closing the pipe early can stop the run before the
+  table is written.
+
+To download the reads, run the same command without `--list-only`. That needs SRA Toolkit 3.4.0 or later, and
+there is no limit on total disk use, so check the selection first. See `--help` for the other options.
+
 ## Method notes
 
 - **Orthogroups** are inferred by OrthoFinder (DIAMOND all-vs-all → normalised
