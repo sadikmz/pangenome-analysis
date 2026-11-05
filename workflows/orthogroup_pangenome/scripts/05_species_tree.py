@@ -16,26 +16,34 @@ Steps:
 Usage:
     python 05_species_tree.py [n_orthogroups]
 Outputs:
-    ../results/tables/species_tree.nwk
-    ../results/figures/fig6_species_tree.png
-    ../data/single_copy_supermatrix.fasta
+    <run-dir>/trees/species_tree.nwk
+    <run-dir>/figures/fig6_species_tree.png
+    <data-dir>/single_copy_supermatrix.fasta
 """
+import argparse
 import os
-import sys
 import glob
 import subprocess
 import random
 import dendropy
 import matplotlib.pyplot as plt
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-DATA = os.path.join(HERE, "..", "data")
-TAB = os.path.join(HERE, "..", "results", "tables")
-FIG = os.path.join(HERE, "..", "results", "figures")
+parser = argparse.ArgumentParser(description="Species tree from sampled single-copy orthogroups.")
+parser.add_argument("--data-dir", required=True, help="Folder with Orthogroups.txt and proteomes/*.faa")
+parser.add_argument("--run-dir", required=True, help="Run folder: output/<workflow>/<dataset>_<YYYYMMDD>")
+parser.add_argument("n_og", nargs="?", type=int, default=60, help="Orthogroups to sample")
+ARGS = parser.parse_args()
+
+DATA = ARGS.data_dir
+TAB = os.path.join(ARGS.run_dir, "tables")
+FIG = os.path.join(ARGS.run_dir, "figures")
+TREE = os.path.join(ARGS.run_dir, "trees")
+os.makedirs(FIG, exist_ok=True)
+os.makedirs(TREE, exist_ok=True)
 WORK = os.path.join(DATA, "_sctree")
 os.makedirs(WORK, exist_ok=True)
 
-N_OG = int(sys.argv[1]) if len(sys.argv) > 1 else 60
+N_OG = ARGS.n_og
 random.seed(42)
 
 
@@ -137,7 +145,7 @@ def main():
     print(f"Concatenated {used} orthogroups -> supermatrix {total_len} aa x {len(species)} species")
 
     # FastTree (LG model for proteins)
-    tree_nwk = os.path.join(TAB, "species_tree.nwk")
+    tree_nwk = os.path.join(TREE, "species_tree.nwk")
     with open(tree_nwk, "w") as out:
         subprocess.run(["fasttree", "-lg", superfa], check=True, stdout=out,
                        stderr=subprocess.DEVNULL)

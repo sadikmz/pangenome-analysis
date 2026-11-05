@@ -28,12 +28,13 @@ What it computes
 5. Per-species contribution table (genes, orthogroups, unique/strain-specific).
 
 Inputs (all resolved relative to this script):
-    ../data/Orthogroups.txt        OrthoFinder MCL orthogroups
-    ../data/proteomes/*.faa        proteomes (for protein->species mapping)
+    <data-dir>/Orthogroups.txt        OrthoFinder MCL orthogroups
+    <data-dir>/proteomes/*.faa        proteomes (for protein->species mapping)
 Outputs:
-    ../results/tables/*.csv        all matrices and summary tables
-    ../results/figures/*.png       all figures
+    <run-dir>/tables/*.csv        all matrices and summary tables
+    <run-dir>/figures/*.png       all figures
 """
+import argparse
 import os
 import glob
 import itertools
@@ -42,10 +43,14 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-DATA = os.path.join(HERE, "..", "data")
-TAB = os.path.join(HERE, "..", "results", "tables")
-FIG = os.path.join(HERE, "..", "results", "figures")
+parser = argparse.ArgumentParser(description="Pangenome partition tables and figures from OrthoFinder orthogroups.")
+parser.add_argument("--data-dir", required=True, help="Folder with Orthogroups.txt and proteomes/*.faa")
+parser.add_argument("--run-dir", required=True, help="Run folder: output/<workflow>/<dataset>_<YYYYMMDD>")
+ARGS = parser.parse_args()
+
+DATA = ARGS.data_dir
+TAB = os.path.join(ARGS.run_dir, "tables")
+FIG = os.path.join(ARGS.run_dir, "figures")
 os.makedirs(TAB, exist_ok=True)
 os.makedirs(FIG, exist_ok=True)
 

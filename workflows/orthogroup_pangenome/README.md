@@ -19,40 +19,41 @@ phylogenomics.
 ## Directory layout
 
 ```
-pangenome_project/
+workflows/orthogroup_pangenome/
 ├── README.md                     this file
-├── REPORT.md                     narrative results + interpretation
 ├── scripts/
-│   ├── 01_download_proteomes.py  fetch RefSeq proteomes from NCBI Datasets
+│   ├── 01_download_asmProt.py    download genomes, proteins, GFF3 and CDS for an accession list
+│   ├── 01_download_proteomes.py  fetch the fixed Aspergillus proteome panel
 │   ├── 02_run_orthofinder.sh     OrthoFinder orthogroup inference
 │   ├── 03_pangenome_analysis.py  pangenome partitioning + accumulation curves
-│   └── 04_phylogenomics.py       gene-content NJ tree + species tree render
-├── data/
-│   ├── proteomes/*.faa           input proteomes
-│   └── Orthogroups.txt           OrthoFinder MCL orthogroups
-├── results/
-│   ├── tables/*.csv              all matrices and summary tables
-│   └── figures/*.png             all figures
-└── logs/orthofinder.log          OrthoFinder run log
+│   ├── 04_phylogenomics.py       gene-content NJ tree + species tree render
+│   └── 05_species_tree.py        species tree from sampled single-copy orthogroups
+└── data/                         inputs, not in Git: proteomes/*.faa, Orthogroups.txt
+
+output/orthogroup_pangenome/<dataset>_<YYYYMMDD>/    run folder, not in Git
 ```
+
+Each run gets its own folder, holding `RUN_INFO.txt`, `tables/`, `trees/`, `figures/`, `reports/` and `logs/`.
 
 ## Reproduce
 
-```bash
-# 1. Environment (conda / mamba)
-mamba create -n pangenome -c bioconda -c conda-forge \
-    orthofinder diamond mcl fastme muscle fasttree \
-    biopython dendropy ete3 seaborn pandas scipy
-conda activate pangenome
+Run from the repository root.
 
-# 2. Run the pipeline in order
-python scripts/01_download_proteomes.py
-bash   scripts/02_run_orthofinder.sh data/proteomes 8
-cp proteomes/OrthoFinder/Results_*/Orthogroups/Orthogroups.txt data/
-python scripts/03_pangenome_analysis.py
-# copy species tree when OrthoFinder finishes its gene-tree step:
-cp proteomes/OrthoFinder/Results_*/Species_Tree/SpeciesTree_rooted.txt data/
-python scripts/04_phylogenomics.py
+```bash
+conda env create -f environment.yml
+conda activate PangenomeAnalysis
+
+W=workflows/orthogroup_pangenome
+DATA=$W/data
+RUN=output/orthogroup_pangenome/aspergillus_6species_$(date -u +%Y%m%d)
+
+python $W/scripts/01_download_proteomes.py
+bash   $W/scripts/02_run_orthofinder.sh $DATA/proteomes 8
+cp $DATA/proteomes/OrthoFinder/Results_*/Orthogroups/Orthogroups.txt $DATA/
+python $W/scripts/03_pangenome_analysis.py --data-dir $DATA --run-dir $RUN
+# copy the species tree when OrthoFinder finishes its gene-tree step:
+cp $DATA/proteomes/OrthoFinder/Results_*/Species_Tree/SpeciesTree_rooted.txt $DATA/
+python $W/scripts/04_phylogenomics.py --data-dir $DATA --run-dir $RUN
 ```
 
 ## Method notes

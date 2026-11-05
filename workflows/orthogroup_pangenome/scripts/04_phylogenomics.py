@@ -16,14 +16,15 @@ Also writes a pairwise shared-orthogroup / Jaccard-similarity matrix, a useful
 comparative summary in its own right.
 
 Inputs:
-    ../results/tables/orthogroup_presence_absence.csv   (from script 03)
-    ../data/SpeciesTree_rooted.txt   (optional; copy from OrthoFinder output)
+    <run-dir>/tables/orthogroup_presence_absence.csv   (from script 03)
+    <data-dir>/SpeciesTree_rooted.txt   (optional; copy from OrthoFinder output)
 Outputs:
-    ../results/tables/pairwise_jaccard.csv
-    ../results/tables/gene_content_tree.nwk
-    ../results/figures/fig5_gene_content_tree.png
-    ../results/figures/fig6_species_tree.png            (if OrthoFinder tree present)
+    <run-dir>/tables/pairwise_jaccard.csv
+    <run-dir>/trees/gene_content_tree.nwk
+    <run-dir>/figures/fig5_gene_content_tree.png
+    <run-dir>/figures/fig6_species_tree.png            (if OrthoFinder tree present)
 """
+import argparse
 import os
 import numpy as np
 import pandas as pd
@@ -31,10 +32,17 @@ import matplotlib.pyplot as plt
 from scipy.spatial.distance import pdist, squareform
 import dendropy
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-TAB = os.path.join(HERE, "..", "results", "tables")
-FIG = os.path.join(HERE, "..", "results", "figures")
-DATA = os.path.join(HERE, "..", "data")
+parser = argparse.ArgumentParser(description="Gene-content tree and OrthoFinder species tree.")
+parser.add_argument("--data-dir", required=True, help="Folder with Orthogroups.txt and proteomes/*.faa")
+parser.add_argument("--run-dir", required=True, help="Run folder: output/<workflow>/<dataset>_<YYYYMMDD>")
+ARGS = parser.parse_args()
+
+DATA = ARGS.data_dir
+TAB = os.path.join(ARGS.run_dir, "tables")
+FIG = os.path.join(ARGS.run_dir, "figures")
+TREE = os.path.join(ARGS.run_dir, "trees")
+os.makedirs(FIG, exist_ok=True)
+os.makedirs(TREE, exist_ok=True)
 
 
 def gene_content_nj(presence):
@@ -111,7 +119,7 @@ def main():
 
     # (A) Gene-content NJ tree
     tree, dm_df = gene_content_nj(presence)
-    tree.write(path=os.path.join(TAB, "gene_content_tree.nwk"), schema="newick")
+    tree.write(path=os.path.join(TREE, "gene_content_tree.nwk"), schema="newick")
     print("Pairwise Jaccard distance matrix:")
     print(dm_df.round(3).to_string())
     ascii_and_plot(tree, "Gene-content neighbour-joining tree (Jaccard)",
@@ -121,7 +129,7 @@ def main():
     sp_tree_path = os.path.join(DATA, "SpeciesTree_rooted.txt")
     if os.path.exists(sp_tree_path):
         st = dendropy.Tree.get(path=sp_tree_path, schema="newick")
-        st.write(path=os.path.join(TAB, "species_tree.nwk"), schema="newick")
+        st.write(path=os.path.join(TREE, "species_tree.nwk"), schema="newick")
         ascii_and_plot(st, "OrthoFinder species tree (single-copy orthologues)",
                        os.path.join(FIG, "fig6_species_tree.png"))
     else:
