@@ -24,6 +24,7 @@ workflows/orthogroup_pangenome/
 ├── scripts/
 │   ├── 01_download_asmProt.py    download genomes, proteins, GFF3 and CDS for an accession list
 │   ├── 01_download_proteomes.py  fetch the fixed Aspergillus proteome panel
+│   ├── 01_download_rnaseq.py     download a species' paired-end and long-read RNA data from SRA
 │   ├── 02_run_orthofinder.sh     OrthoFinder orthogroup inference
 │   ├── 03_pangenome_analysis.py  pangenome partitioning + accumulation curves
 │   ├── 04_phylogenomics.py       gene-content NJ tree + species tree render
