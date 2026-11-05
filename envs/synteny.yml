@@ -1,0 +1,10 @@
+# SyRI has no Python 3.12 build, so this workflow has its own environment.
+name: PangenomeSynteny
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - minimap2
+  - samtools
+  - syri
+  - plotsr

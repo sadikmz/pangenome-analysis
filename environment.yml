@@ -1,0 +1,15 @@
+name: PangenomeAnalysis
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.12
+  - orthofinder
+  - diamond
+  - mcl
+  - fastme
+  - muscle
+  - fasttree
+  - pip
+  - pip:
+    - -e .                 # installs the pga package and its Python dependencies
